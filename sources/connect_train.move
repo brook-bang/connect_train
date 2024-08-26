@@ -1,14 +1,19 @@
-module connect_train::connect_train_two_vector {
+/// Module: connect_train
+module connect_train::connect_train {
 
     use std::vector;
     use sui::balance;
-    use sui::balance::Balance;
+    use sui::balance::{Balance, value, split};
     use sui::coin;
     use sui::coin::{Coin};
     use sui::random;
     use sui::random::Random;
     use sui::sui::SUI;
     use sui::transfer;
+    use connect_train::house_data::{HouseData, fees, borrow_mut_fee};
+
+    const EPlayerMismatchFunction: u64 = 0;
+    const EPlayerMismatchRound: u64 =1;
 
     public struct Game has key {
         id: UID,
@@ -18,14 +23,10 @@ module connect_train::connect_train_two_vector {
         playerB_card: vector<u64>,
         card_pool: vector<u64>,
         stake_pool: vector<Balance<SUI>>,
+        round: u64,
     }
 
-    public struct Pool has key{
-        id: UID,
-        balance: Balance<SUI>,
-    }
-
-    public entry fun create(playerB: address,rand: &Random,ctx:&mut TxContext){
+    public fun create(playerB: address,rand: &Random,ctx:&mut TxContext){
         let mut full_card = vector[
             1,2,3,4,5,6,7,8,9,10,11,12,13,
             1,2,3,4,5,6,7,8,9,10,11,12,13,
@@ -51,126 +52,112 @@ module connect_train::connect_train_two_vector {
             playerB_card:playB_full_card,
             card_pool:vector[],
             stake_pool: vector[],
-            single_stake_amount:1_000_000_000,
-            fee: 100,
+            round:0,
         };
         transfer::share_object(game);
     }
 
     public fun playerA_place_card(game: &mut Game,rand: &Random,ctx: &mut TxContext): u64{
 
-        assert!(ctx.sender() == game.playerA,1);
+        assert!(ctx.sender() == game.playerA,EPlayerMismatchFunction);
+        assert!(game.round % 2 == 0,EPlayerMismatchRound );
 
-        let mut card = game.playerA_card;
         let len = vector::length(&game.playerA_card);
 
         let mut generator = rand.new_generator(ctx); // 创建随机数生成器
         let rand_num = generator.generate_u64_in_range(0, len-1);
-        vector::remove(&mut card,rand_num);
-        rand_num
+        let place_card = vector::remove(&mut game.playerA_card,rand_num);
+        place_card
     }
 
     public fun playerB_place_card(game: &mut Game,rand: &Random,ctx: &mut TxContext): u64{
 
-        assert!(ctx.sender() == game.playerB,1);
+        assert!(ctx.sender() == game.playerB,EPlayerMismatchFunction);
+        assert!(game.round % 2 != 0,EPlayerMismatchRound );
 
-        let mut card = game.playerB_card;
         let len = vector::length(&game.playerB_card);
 
         let mut generator = rand.new_generator(ctx); // 创建随机数生成器
         let rand_num = generator.generate_u64_in_range(0, len-1);
-        vector::remove(&mut card,rand_num);
-        rand_num
+        let place_card = vector::remove(&mut game.playerB_card,rand_num);
+        place_card
     }
 
-    public entry fun playerA_play_game(game: &mut Game,coin: Coin<SUI>,rand: &Random,ctx: &mut TxContext){
+    public entry fun playerA_play_game(house_data:&mut HouseData,game: &mut Game,coin: Coin<SUI>,rand: &Random,ctx: &mut TxContext){
 
-        assert!(coin.value() > game.single_stake_amount,1);
+        assert!(ctx.sender() == game.playerA,EPlayerMismatchFunction);
+        assert!(game.round % 2 == 0,EPlayerMismatchRound );
 
-        let stake = coin::into_balance(coin);
+        let mut stake = coin::into_balance(coin);
+        pay_fee(house_data,&mut stake);
 
+        vector::push_back(&mut game.stake_pool,stake);
         let num = playerA_place_card(game,rand,ctx);
-        vector::push_back(&mut game.stake_pool,stake);
-
-        let (boolean,same_card_index) = vector::index_of(&game.card_pool,&num);
-        let mut i = same_card_index;
-
-        if(boolean){
-            let mut wincoin_pool = balance::zero<SUI>();
-            let len = vector::length(&game.card_pool);
-            while (i <= len){
-                vector::remove(&mut game.card_pool,i);
-                let wincoin = vector::remove(&mut game.stake_pool,i);
-                wincoin_pool.join(wincoin);
-                i = i + 1;
-            };
-            let last_stake_pool = vector::length(&game.stake_pool);
-            wincoin_pool.join(vector::remove(&mut game.stake_pool,last_stake_pool));
-            transfer::public_transfer(coin::from_balance(wincoin_pool,ctx),ctx.sender());
-        } else {
-            vector::remove(&mut game.playerA_card,num);
-            vector::push_back(&mut game.card_pool,num);
-        }
-
-    }
-
-    public entry fun playerB_play_game(game: &mut Game,coin: Coin<SUI>,rand: &Random,ctx: &mut TxContext){
-
-        assert!(coin.value() > game.single_stake_amount,1);
-
-        let stake = coin::into_balance(coin);
-
-        let num = playerB_place_card(game,rand,ctx);
-        vector::push_back(&mut game.stake_pool,stake);
 
         let (boolean,same_card_index) = vector::index_of(&game.card_pool,&num);
         let i = same_card_index;
 
         if(boolean){
             let mut wincoin_pool = balance::zero<SUI>();
-            let len = vector::length(&game.card_pool);
-            if(i <= len){
-                vector::remove(&mut game.card_pool,i);
+            while (i < vector::length(&game.card_pool)){
+                let wincard = vector::remove(&mut game.card_pool,i);
+                vector::push_back(&mut game.playerA_card,wincard);
                 let wincoin = vector::remove(&mut game.stake_pool,i);
                 wincoin_pool.join(wincoin);
-                i + 1;
             };
             let last_stake_pool = vector::length(&game.stake_pool);
-            wincoin_pool.join(vector::remove(&mut game.stake_pool,last_stake_pool));
+            wincoin_pool.join(vector::remove(&mut game.stake_pool,last_stake_pool - 1 ));
             transfer::public_transfer(coin::from_balance(wincoin_pool,ctx),ctx.sender());
+            vector::push_back(&mut game.playerA_card, num);
         } else {
             vector::push_back(&mut game.card_pool,num);
-        }
+        };
+
+        game.round = game.round + 1;
+
     }
 
-    // public fun playerB_play_game(game: &mut Game,coin: Coin<SUI>,rand: &Random,ctx: &mut TxContext){
-    //
-    //     assert!(coin.value() > game.single_stake_amount,1);
-    //
-    //     let stake = coin::into_balance(coin);
-    //
-    //     let num = playerB_place_card(game,rand,ctx);
-    //
-    //     vector::push_back(&mut game.card_pool,num);
-    //     vector::push_back(&mut game.stake_pool,stake);
-    //     if(vector::contains(&game.card_pool,&num)){
-    //         let same_card = find_same(game);
-    //         let mut win_coin_pool = balance::zero<SUI>();
-    //         if( same_card < game.card_pool.length() ){
-    //             vector::remove(&mut game.card_pool,same_card);
-    //             let win_coin = vector::remove(&mut game.stake_pool,same_card);
-    //             win_coin_pool.join(win_coin);
-    //             same_card + 1;
-    //         };
-    //     };
-    // }
-    //
-    // public fun win_sum(game: &Game): u64{
-    //     let len = game.card_pool.length();
-    //     let first = find_same(game);
-    //     let win_len = len - 1 - first;
-    //     win_len
-    // }
+    public entry fun playerB_play_game(house_data:&mut HouseData,game: &mut Game,coin: Coin<SUI>,rand: &Random,ctx: &mut TxContext){
 
+        assert!(ctx.sender() == game.playerB,EPlayerMismatchFunction);
+        assert!(game.round % 2 != 0,EPlayerMismatchRound );
+
+        let mut stake = coin::into_balance(coin);
+        pay_fee(house_data,&mut stake);
+
+        vector::push_back(&mut game.stake_pool,stake);
+        let num = playerB_place_card(game,rand,ctx);
+
+        let (boolean,same_card_index) = vector::index_of(&game.card_pool,&num);
+        let i = same_card_index;
+
+        if(boolean){
+            let mut wincoin_pool = balance::zero<SUI>();
+            while(i < vector::length(&game.card_pool)){
+                let wincard = vector::remove(&mut game.card_pool,i);
+                vector::push_back(&mut game.playerB_card,wincard);
+
+                let wincoin = vector::remove(&mut game.stake_pool,i);
+                wincoin_pool.join(wincoin);
+            };
+            let last_stake_pool = vector::length(&game.stake_pool);
+            wincoin_pool.join(vector::remove(&mut game.stake_pool,last_stake_pool - 1 ));
+            transfer::public_transfer(coin::from_balance(wincoin_pool,ctx),ctx.sender());
+            vector::push_back(&mut game.playerB_card, num);
+        } else {
+            vector::push_back(&mut game.card_pool,num);
+        };
+
+        game.round = game.round + 1;
+
+    }
+
+    public(package) fun pay_fee(house_data:&mut HouseData,balance: &mut Balance<SUI>){
+        let fee = balance.value() * house_data.fee_rate() / 10000;
+        let fees = balance.split(fee);
+        let house_fees = borrow_mut_fee(house_data);
+        house_fees.join(fees);
+    }
 
 }
+

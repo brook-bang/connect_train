@@ -1,4 +1,4 @@
-
+/*
 #[test_only]
 module connect_train::connect_train_tests {
     // uncomment this line to import the module
@@ -16,3 +16,4 @@ module connect_train::connect_train_tests {
         abort ENotImplemented
     }
 }
+*/
